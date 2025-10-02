@@ -35,52 +35,55 @@ def download_from_bucket(best_checkpoint):
     logging.info(f"Проверяю и создаю директорию: {best_checkpoint}")
     os.makedirs(best_checkpoint, exist_ok=True)
 
+    missing_files = []
     for file in MODEL_FILES:
         local_path = os.path.join(best_checkpoint, file)
-
         if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-            logging.info(f"Файл уже существует: {local_path}")
+            logging.info(f"Файл уже существует: {file}")
             continue
+        missing_files.append(file)
 
+    if not missing_files:
+        logging.info("Все файлы уже присутствуют, скачивание не требуется ✅")
+        return
+
+    for file in missing_files:
         url = f"{BASE_URL}/{file}"
         logging.info(f"Начинаю скачивание {file} из {url}")
-
         try:
             r = requests.get(url, stream=True, timeout=60)
             r.raise_for_status()
 
-            total_size = int(r.headers.get('content-length', 0))
-            if total_size == 0:
-                logging.warning(f"Не удалось получить размер файла {file}.")
+            total_size = int(r.headers.get("content-length", 0))
             logging.info(f"Размер файла {file}: {total_size} байт")
 
+            local_path = os.path.join(best_checkpoint, file)
             with open(local_path, "wb") as f:
                 downloaded = 0
                 start_time = time.time()
-
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-
                         if total_size > 0:
                             percent = (downloaded / total_size) * 100
                             elapsed = time.time() - start_time
-                            speed = downloaded / (elapsed + 1e-6) / 1024  # KB/s
+                            speed = downloaded / (elapsed + 1e-6) / 1024
                             remaining = (total_size - downloaded) / (speed * 1024 + 1e-6)
                             logging.info(
-                                f"Скачано {downloaded}/{total_size} байт "
-                                f"({percent:.2f}%), скорость {speed:.2f} KB/s, "
-                                f"осталось ~{remaining:.1f} сек."
+                                f"{file}: {percent:.2f}% скачано, "
+                                f"{downloaded}/{total_size} байт, скорость {speed:.2f} KB/s, "
+                                f"осталось ~{remaining:.1f} сек"
                             )
-
-                logging.info(f"Файл {file} успешно загружен: {local_path}")
 
             if os.path.getsize(local_path) == 0:
                 logging.error(f"Файл {local_path} пуст после загрузки!")
+            else:
+                logging.info(f"Файл {file} успешно загружен ✅")
 
         except Exception as e:
             logging.exception(f"Ошибка при скачивании {file}: {e}")
+
 
 # -------------------------
 # Логирование
@@ -344,7 +347,14 @@ class PredictRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     loop = asyncio.get_event_loop()
+    logger.info("Запуск процесса загрузки модели...")
+
+    # Сначала скачиваем файлы
+    await loop.run_in_executor(None, download_from_bucket, best_checkpoint)
+
+    # Потом загружаем модель
     await loop.run_in_executor(None, load_model_sync)
+
 
 @app.post("/api/predict")
 async def predict(req: PredictRequest, request: Request):
@@ -366,6 +376,5 @@ async def predict(req: PredictRequest, request: Request):
 
 
 @app.post("/health")
-async def predict(req: PredictRequest, request: Request):
-    return [
-        {"Я жив..."}]
+async def health(req: Request):
+    return {"status": "Я жив... 🚀"}

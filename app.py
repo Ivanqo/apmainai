@@ -299,6 +299,14 @@ def load_model_sync():
 # Вспомогательные функции — Блок 3
 # -------------------------
 
+with open("/app/brands_all.txt", "r", encoding="utf-8") as f:
+    BRANDS = [line.strip().lower() for line in f if line.strip()]
+logger.info(f"{BRANDS}")
+BRANDS += ["coca-cola", "pepsi", "fanta", "sprite", "lipton", "lay's", "pringles", "kitkat", "oreo", "milka", "простоквашино", "домик в деревне", "valio", "danone", "добрый", "rich", "j7", "bonaqua", "святой источник"]
+
+VOLUME_UNITS = {"г", "кг", "л", "мл", "шт", "гр", "грамм", "килограмм"}
+PERCENT_UNITS = {"%", "проц", "процент"}
+
 def aggregate_labels(subtok_labels: list) -> str:
     """
     Гибридная агрегация:
@@ -319,15 +327,6 @@ def aggregate_labels(subtok_labels: list) -> str:
 
     # fallback → majority
     return Counter(subtok_labels).most_common(1)[0][0]
-
-
-with open("/app/brands_all.txt", "r", encoding="utf-8") as f:
-    BRANDS = [line.strip().lower() for line in f if line.strip()]
-logger.info(f"{BRANDS}")
-BRANDS += ["coca-cola", "pepsi", "fanta", "sprite", "lipton", "lay's", "pringles", "kitkat", "oreo", "milka", "простоквашино", "домик в деревне", "valio", "danone", "добрый", "rich", "j7", "bonaqua", "святой источник"]
-
-VOLUME_UNITS = {"г", "кг", "л", "мл", "шт", "гр", "грамм", "килограмм"}
-PERCENT_UNITS = {"%", "проц", "процент"}
 
 def validate_entity(entity_type: str, text: str) -> bool:
     text = text.strip().lower()
@@ -392,7 +391,7 @@ def postprocess_annotations(text: str, raw_annotations: list) -> list:
 
         # Склейка непрерывных сущностей
         if prev_label and (prev_label.startswith("B-") or prev_label.startswith("I-")):
-            if current_type == prev_type and start_char == prev_end + 1:
+            if current_type == prev_type and (start_char == prev_end + 1 or text[prev_end:start_char].strip(" -!/\\").isspace() or all(c in "-!/\\ " for c in text[prev_end:start_char])):
                 merged.append((start_char, end_char, f"I-{current_type}"))
                 prev_label = f"I-{current_type}"
                 prev_end = end_char

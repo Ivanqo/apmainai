@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import asyncio
 import time
@@ -21,7 +19,9 @@ import requests
 best_checkpoint = "ner_model/checkpoint-15000"
 os.makedirs(best_checkpoint, exist_ok=True)
 
-# Сюда впиши ссылки на свои файлы из Object Storage
+# Сюда вписываем ссылки на свои файлы из Yandex Object Storage
+# ВАЖНО: бакет должен быть открытым для данного кода!
+
 BASE_URL = "https://storage.yandexcloud.net/model-inf"
 MODEL_FILES = [
     "pytorch_model.bin",
@@ -343,6 +343,37 @@ def validate_entity(entity_type: str, text: str) -> bool:
         return any(unit in text for unit in PERCENT_UNITS) and any(char.isdigit() for char in text)
     return False
 
+def merge_and_filter_entities(text: str, annotations: list) -> list:
+    if not annotations:
+        return annotations
+
+    merged_entities = []
+    prev_start, prev_end, prev_label = annotations[0]
+
+    for start, end, label in annotations[1:]:
+        # Склеиваем соседние сущности одного типа
+        if prev_label == label and start <= prev_end + 2:  # +2 чтобы мягче склеивать
+            prev_end = end
+        else:
+            merged_entities.append((prev_start, prev_end, prev_label))
+            prev_start, prev_end, prev_label = start, end, label
+    merged_entities.append((prev_start, prev_end, prev_label))
+
+    # Фильтрация коротких или некорректных сущностей
+    filtered_entities = []
+    for start, end, label in merged_entities:
+        entity_text = text[start:end].strip()
+        if label != "O":
+            entity_type = label.split("-", 1)[-1]
+            if not validate_entity(entity_type, entity_text):
+                continue
+            if len(entity_text) < 3:  # минимальная длина
+                continue
+        filtered_entities.append((start, end, label))
+
+    return filtered_entities
+
+
 
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
     if not raw_annotations:
@@ -417,6 +448,7 @@ def postprocess_annotations(text: str, raw_annotations: list) -> list:
             if not added:
                 merged.append((gap_start, len(text) - 1, "O"))
 
+    merged = merge_and_filter_entities(text, merged)
     return merged
 
 def predict_annotations(

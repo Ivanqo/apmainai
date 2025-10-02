@@ -298,6 +298,7 @@ def load_model_sync():
 # -------------------------
 # Вспомогательные функции — Блок 3
 # -------------------------
+
 def aggregate_labels(subtok_labels: list) -> str:
     """
     Гибридная агрегация:
@@ -343,70 +344,81 @@ def validate_entity(entity_type: str, text: str) -> bool:
         return any(unit in text for unit in PERCENT_UNITS) and any(char.isdigit() for char in text)
     return False
 
-def merge_and_filter_entities(text: str, annotations: list) -> list:
-    if not annotations:
-        return annotations
-
-    merged_entities = []
-    prev_start, prev_end, prev_label = annotations[0]
-
-    for start, end, label in annotations[1:]:
-        # Склеиваем соседние сущности одного типа или мелкие "O"
-        if prev_label == label and start <= prev_end + 2:
-            prev_end = end
-        else:
-            merged_entities.append((prev_start, prev_end, prev_label))
-            prev_start, prev_end, prev_label = start, end, label
-    merged_entities.append((prev_start, prev_end, prev_label))
-
-    # Фильтрация коротких или некорректных сущностей
-    filtered_entities = []
-    for start, end, label in merged_entities:
-        entity_text = text[start:end+1].strip()
-        if label != "O":
-            entity_type = label.split("-", 1)[-1]
-            if not validate_entity(entity_type, entity_text):
-                label = "O"
-        filtered_entities.append((start, end, label))
-
-    return filtered_entities
-
-
 
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
     if not raw_annotations:
-        return [(0, len(text) - 1, "O")]
+        return [(0, len(text), "O")]  # весь текст как O, если пусто
 
     merged = []
     prev_label = None
-    prev_end = -1
+    prev_type = None
+    prev_end = -1  # индекс конца предыдущего спана
 
     for start_char, end_char, label in raw_annotations:
-        # Заполняем "O" перед сущностью, если есть пропуск
-        if prev_end < start_char - 1:
-            merged.append((prev_end + 1, start_char - 1, "O"))
+        # Проверяем на "дыру" между предыдущим и текущим спаном
+        if start_char > prev_end + 1:
+            gap_start = prev_end + 1
+            gap_end = start_char - 1
+            gap_text = text[gap_start:gap_end + 1].strip()
 
-        # Склейка только одинаковых сущностей без агрессивного расширения
-        if merged and prev_label and prev_label != "O" and label != "O":
-            prev_type = prev_label.split("-", 1)[-1]
-            cur_type = label.split("-", 1)[-1]
-            if prev_type == cur_type and start_char <= prev_end + 1:
-                merged[-1] = (merged[-1][0], end_char, prev_label)
+            # 1. Если дыра очень маленькая (< 3 символов) → присоединяем к соседям
+            if len(gap_text) <= 2:
+                if merged and prev_label and prev_label != "O":
+                    # расширяем предыдущую сущность
+                    last_start, last_end, last_label = merged[-1]
+                    merged[-1] = (last_start, gap_end, last_label)
+                else:
+                    # если после будет сущность → расширим её
+                    start_char = gap_start
+            # 2. Если текст в дырке сам является валидной сущностью
+            elif gap_text:
+                for etype in ["BRAND", "VOLUME", "PERCENT", "TYPE"]:
+                    if validate_entity(etype, gap_text):
+                        merged.append((gap_start, gap_end, f"B-{etype}"))
+                        break
+                else:
+                    # 3. Иначе дыра → "O"
+                    merged.append((gap_start, gap_end, "O"))
+
+        # Обрабатываем текущий токен
+        if label == "O":
+            merged.append((start_char, end_char, "O"))
+            prev_label = None
+            prev_type = None
+            prev_end = end_char
+            continue
+
+        current_type = label.split("-", 1)[1]
+
+        # Склейка непрерывных сущностей
+        if prev_label and (prev_label.startswith("B-") or prev_label.startswith("I-")):
+            if current_type == prev_type and start_char == prev_end + 1:
+                merged.append((start_char, end_char, f"I-{current_type}"))
+                prev_label = f"I-{current_type}"
                 prev_end = end_char
                 continue
 
         merged.append((start_char, end_char, label))
         prev_label = label
+        prev_type = current_type
         prev_end = end_char
 
-    # Заполняем "O" в конце текста, если нужно
+    # Проверяем хвост после последней сущности
     if prev_end < len(text) - 1:
-        merged.append((prev_end + 1, len(text) - 1, "O"))
+        gap_start = prev_end + 1
+        gap_text = text[gap_start:].strip()
+        if gap_text:
+            # если остаток — известная сущность
+            added = False
+            for etype in ["BRAND", "VOLUME", "PERCENT", "TYPE"]:
+                if validate_entity(etype, gap_text):
+                    merged.append((gap_start, len(text) - 1, f"B-{etype}"))
+                    added = True
+                    break
+            if not added:
+                merged.append((gap_start, len(text) - 1, "O"))
 
-    # Минимальная фильтрация без агрессивной модификации
-    merged = merge_and_filter_entities(text, merged)
     return merged
-
 
 def predict_annotations(
     text: str,

@@ -16,6 +16,8 @@ import uvicorn
 import boto3
 import requests
 import re 
+import string
+
 
 best_checkpoint = "ner_model/checkpoint-15000"
 os.makedirs(best_checkpoint, exist_ok=True)

@@ -205,39 +205,18 @@ DEVICE = None
 def load_model_sync():
     global model, tokenizer, DEVICE
     try:
-        logger.info(f"Проверяю содержимое директории: {best_checkpoint}")
-        if os.path.exists(best_checkpoint):
-            files = os.listdir(best_checkpoint)
-            logger.info(f"Файлы в {best_checkpoint}: {files}")
-        else:
-            logger.error(f"Директория {best_checkpoint} не существует!")
-
-        logger.info("Начинаю загрузку токенизатора...")
-        tokenizer = AutoTokenizer.from_pretrained(best_checkpoint)
-        logger.info("Токенизатор загружен ✅")
-
-        logger.info("Создаю модель...")
-        model = NERWithCRF(
-            model_name="DeepPavlov/rubert-base-cased-conversational",
+        logger.info("Загружаю модель ИЗ ЛОКАЛЬНОЙ ДИРЕКТОРИИ...")
+        
+        # Загружаем ВСЮ модель из локальной директории
+        model = NERWithCRF.from_pretrained(
+            best_checkpoint,
             num_labels=len(label_list)
         )
-
-        model_path = os.path.join(best_checkpoint, "pytorch_model.bin")
-        if not os.path.exists(model_path):
-            logger.error(f"Файл весов модели не найден: {model_path}")
-        else:
-            logger.info(f"Загружаю веса модели из {model_path}")
-            state_dict = torch.load(model_path, map_location="cpu")
-            model.load_state_dict(state_dict)
-            logger.info("Веса модели загружены ✅")
-
-        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-        model.to(DEVICE)
-        model.eval()
-        logger.info("Модель с CRF успешно загружена 🚀")
-
+        
+        logger.info("Модель загружена целиком ✅")
+        
     except Exception as e:
-        logger.exception(f"Ошибка при загрузке модели: {e}")
+        logger.exception(f"Ошибка: {e}")
 # -------------------------
 # Вспомогательные функции — Блок 3
 # -------------------------

@@ -176,7 +176,7 @@ def load_model_sync():
 # -------------------------
 # Вспомогательные функции — Блок 3
 # -------------------------
-with open("brands_all.txt", "r", encoding="utf-8") as f:
+with open("/app/brands_all.txt", "r", encoding="utf-8") as f:
     BRANDS = [line.strip().lower() for line in f if line.strip()]
 
 BRANDS += ["coca-cola", "pepsi", "fanta", "sprite", "lipton", "lay's", "pringles", "kitkat", "oreo", "milka", "простоквашино", "домик в деревне", "valio", "danone", "добрый", "rich", "j7", "bonaqua", "святой источник"]

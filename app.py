@@ -343,6 +343,7 @@ def validate_entity(entity_type: str, text: str) -> bool:
         return any(unit in text for unit in PERCENT_UNITS) and any(char.isdigit() for char in text)
     return False
 
+
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
     if not raw_annotations:
         return [(0, len(text), "O")]  # весь текст как O, если пусто
@@ -518,10 +519,11 @@ async def predict(req: PredictRequest, request: Request):
 
     elapsed = time.time() - start_time
     logger.info(f"Обработка запроса заняла {elapsed:.4f} секунд")
+    
+    # Возвращаем ВСЕ аннотации как локально
     return [
         {"start_index": start, "end_index": end, "entity": label}
         for start, end, label in annotations
-        if label != "O"
     ]
 
 

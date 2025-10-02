@@ -221,7 +221,7 @@ model = None
 tokenizer = None
 DEVICE = None
 
-d# -------------------------
+# -------------------------
 # Исправленная загрузка модели — Блок 2
 # -------------------------
 label_list = ["O", "B-TYPE", "I-TYPE", "B-BRAND", "I-BRAND", 
@@ -252,7 +252,7 @@ def load_model_sync():
 
         logger.info("Создаю модель с теми же параметрами...")
         model = NERWithCRF(
-            model_name=model_checkpoint,  # ТОЧНО ТАК ЖЕ КАК ПРИ ОБУЧЕНИИ
+            model_name=model_checkpoint,
             num_labels=len(label_list),
         )
         logger.info("Архитектура модели создана ✅")

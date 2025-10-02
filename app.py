@@ -96,10 +96,11 @@ logger = logging.getLogger(__name__)
 # -------------------------
 # Класс модели — Блок 1
 # -------------------------
-class NERWithCRF(nn.Module): 
+class NERWithCRF(nn.Module):
     def __init__(self, model_name, num_labels, lstm_hidden=256, lstm_layers=2, dropout_prob=0.3):
         super().__init__()
 
+        # Загружаем энкодер
         self.encoder = AutoModel.from_pretrained(
             model_name,
             use_safetensors=True,
@@ -107,10 +108,13 @@ class NERWithCRF(nn.Module):
         )
 
         self.hidden_size = self.encoder.config.hidden_size
-        self.num_hidden_layers = self.encoder.config.num_hidden_layers + 1
+        self.num_hidden_layers = self.encoder.config.num_hidden_layers + 1  # включая embeddings
+
+        # Будем использовать только последние 4 слоя
         self.num_used_layers = 4
         self.layer_weights = nn.Parameter(torch.ones(self.num_used_layers) / self.num_used_layers)
 
+        # LSTM
         self.lstm = nn.LSTM(
             input_size=self.hidden_size,
             hidden_size=lstm_hidden,
@@ -123,6 +127,7 @@ class NERWithCRF(nn.Module):
         self.layer_norm = nn.LayerNorm(lstm_hidden * 2)
         self.dropout = nn.Dropout(dropout_prob)
 
+        # Классификатор
         self.classifier = nn.Sequential(
             nn.Linear(lstm_hidden * 2, 256),
             nn.GELU(),
@@ -130,7 +135,10 @@ class NERWithCRF(nn.Module):
             nn.Linear(256, num_labels)
         )
 
+        # CRF слой
         self.crf = CRF(num_labels, batch_first=True)
+
+        # Веса для классов (если будут нужны позже)
         self.class_weights = nn.Parameter(torch.ones(num_labels), requires_grad=False)
 
     def forward(self, input_ids, attention_mask=None, labels=None):
@@ -145,14 +153,23 @@ class NERWithCRF(nn.Module):
             output_hidden_states=True
         )
 
-        hidden_states = outputs.hidden_states
-        last_layers = torch.stack(hidden_states[-self.num_used_layers:])
+        hidden_states = outputs.hidden_states  # tuple из num_hidden_layers слоёв
+        last_layers = torch.stack(hidden_states[-self.num_used_layers:])  # (4, batch, seq, hidden)
+
+        # Взвешиваем только последние 4 слоя
         weighted_layers = (last_layers * self.layer_weights.view(-1, 1, 1, 1)).sum(0)
 
-        lengths = attention_mask.sum(dim=1)
+        # LSTM
+        lengths = attention_mask.sum(dim=1)  # длины последовательностей
         packed_input = pack_padded_sequence(weighted_layers, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_output, _ = self.lstm(packed_input)
-        lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True)
+
+        # Паддинг до максимальной длины входа
+        lstm_out, _ = pad_packed_sequence(
+            packed_output,
+            batch_first=True,
+            total_length=attention_mask.size(1)  # ключевой момент
+        )
 
         lstm_out = self.layer_norm(lstm_out)
         lstm_out = self.dropout(lstm_out)
@@ -166,11 +183,13 @@ class NERWithCRF(nn.Module):
 
             crf_loss = -self.crf(emissions, labels_clean, mask=mask, reduction="mean")
             macro_f1_loss = self.macro_f1_loss(self.crf.decode(emissions, mask=mask), labels_clean, mask)
+
             loss = crf_loss + 0.3 * macro_f1_loss
             return {"loss": loss, "logits": emissions}
         else:
             predictions = self.crf.decode(emissions, mask=mask)
             return {"logits": emissions, "predictions": predictions}
+
 
     def macro_f1_loss(self, preds, labels, mask):
         eps = 1e-8
@@ -181,7 +200,7 @@ class NERWithCRF(nn.Module):
         for i, seq in enumerate(preds):
             preds_tensor[i, :len(seq)] = torch.tensor(seq, device=labels.device)
 
-        for cls in range(1, num_classes):
+        for cls in range(1, num_classes):  # пропускаем O
             tp = ((preds_tensor == cls) & (labels == cls) & mask).sum().float()
             fp = ((preds_tensor == cls) & (labels != cls) & mask).sum().float()
             fn = ((preds_tensor != cls) & (labels == cls) & mask).sum().float()
@@ -202,21 +221,80 @@ model = None
 tokenizer = None
 DEVICE = None
 
+d# -------------------------
+# Исправленная загрузка модели — Блок 2
+# -------------------------
+label_list = ["O", "B-TYPE", "I-TYPE", "B-BRAND", "I-BRAND", 
+              "B-VOLUME", "I-VOLUME", "B-PERCENT", "I-PERCENT"]
+label2id = {label: idx for idx, label in enumerate(label_list)}
+id2label = {idx: label for label, idx in label2id.items()}
+
+model = None
+tokenizer = None
+DEVICE = None
+
 def load_model_sync():
     global model, tokenizer, DEVICE
     try:
-        logger.info("Загружаю модель ИЗ ЛОКАЛЬНОЙ ДИРЕКТОРИИ...")
+        logger.info(f"Проверяю содержимое директории: {best_checkpoint}")
+        if os.path.exists(best_checkpoint):
+            files = os.listdir(best_checkpoint)
+            logger.info(f"Файлы в {best_checkpoint}: {files}")
+        else:
+            logger.error(f"Директория {best_checkpoint} не существует!")
+
+        # КРИТИЧЕСКИ ВАЖНО: используем ту же модель, что и при обучении
+        model_checkpoint = "DeepPavlov/rubert-base-cased-conversational"
         
-        # Загружаем ВСЮ модель из локальной директории
-        model = NERWithCRF.from_pretrained(
-            best_checkpoint,
-            num_labels=len(label_list)
+        logger.info("Загружаю токенизатор...")
+        tokenizer = AutoTokenizer.from_pretrained(best_checkpoint)
+        logger.info("Токенизатор загружен ✅")
+
+        logger.info("Создаю модель с теми же параметрами...")
+        model = NERWithCRF(
+            model_name=model_checkpoint,  # ТОЧНО ТАК ЖЕ КАК ПРИ ОБУЧЕНИИ
+            num_labels=len(label_list),
         )
+        logger.info("Архитектура модели создана ✅")
+
+        model_path = os.path.join(best_checkpoint, "pytorch_model.bin")
+        if not os.path.exists(model_path):
+            logger.error(f"Файл весов модели не найден: {model_path}")
+            return
+
+        logger.info(f"Загружаю веса модели из {model_path}")
+        state_dict = torch.load(model_path, map_location="cpu")
         
-        logger.info("Модель загружена целиком ✅")
+        # Важная проверка: сравни архитектуры
+        model_state_keys = set(model.state_dict().keys())
+        loaded_state_keys = set(state_dict.keys())
         
+        if model_state_keys != loaded_state_keys:
+            logger.warning(f"Расхождение в ключах модели!")
+            missing = model_state_keys - loaded_state_keys
+            extra = loaded_state_keys - model_state_keys
+            if missing:
+                logger.warning(f"Отсутствующие ключи: {missing}")
+            if extra:
+                logger.warning(f"Лишние ключи: {extra}")
+        
+        model.load_state_dict(state_dict, strict=False)  # strict=False для устойчивости
+        logger.info("Веса модели загружены ✅")
+
+        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(DEVICE)
+        model.eval()
+        
+        # Проверка устройства
+        logger.info(f"Модель перемещена на устройство: {DEVICE}")
+        logger.info(f"Первый параметр модели на: {next(model.parameters()).device}")
+        
+        logger.info("Модель с CRF успешно загружена 🚀")
+
     except Exception as e:
-        logger.exception(f"Ошибка: {e}")
+        logger.exception(f"Ошибка при загрузке модели: {e}")
+        raise
+
 # -------------------------
 # Вспомогательные функции — Блок 3
 # -------------------------

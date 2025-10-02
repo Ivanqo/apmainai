@@ -376,6 +376,6 @@ async def predict(req: PredictRequest, request: Request):
     ]
 
 
-@app.post("/health")
-async def health(req: Request):
-    return {"status": "Я жив... 🚀"}
+@app.get("/health")
+async def health():
+    return {"status": "ok... Mb)"}

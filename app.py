@@ -85,6 +85,7 @@ def download_from_bucket(best_checkpoint):
             logging.exception(f"Ошибка при скачивании {file}: {e}")
 
 
+
 # -------------------------
 # Логирование
 # -------------------------

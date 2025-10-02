@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
         uvicorn[standard] \
         torch \
         transformers \
+        boto3\
         pandas && \
     pip install --no-cache-dir git+https://github.com/kmkurn/pytorch-crf.git
 

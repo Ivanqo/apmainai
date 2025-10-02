@@ -15,6 +15,7 @@ from pydantic import BaseModel
 import uvicorn
 import boto3
 import requests
+import re 
 
 best_checkpoint = "ner_model/checkpoint-15000"
 os.makedirs(best_checkpoint, exist_ok=True)
@@ -356,60 +357,42 @@ def normalize_percent_blocks(raw_annotations, text):
 
     while i < n:
         s, e, lbl = raw_annotations[i]
-        typ = lbl.split("-", 1)[1] if "-" in lbl else lbl
+        typ = lbl.split("-", 1)[-1]
 
-        if typ == "PERCENT":
-            # собираем блок подряд идущих PERCENT
-            j = i
-            block = []
-            while j < n:
-                lj = raw_annotations[j][2]
-                tj = lj.split("-", 1)[1] if "-" in lj else lj
-                if tj == "PERCENT":
-                    block.append(raw_annotations[j])
-                    j += 1
-                else:
-                    break
-
-            toks = [text[ss:ee] for ss, ee, _ in block]
-
-            # индексы токенов, содержащих цифру; и индексы токенов-юнитов процента
-            digit_idxs = [k for k, tok in enumerate(toks) if re.search(r'\d', tok)]
-            unit_idxs = [k for k, tok in enumerate(toks) if re.search(r'[%]|проц|процент', tok.lower())]
-
-            if digit_idxs:
-                # числовая часть — от первой до последней цифры
-                first = digit_idxs[0]
-                last = digit_idxs[-1]
-                # включаем соседние пунктуационные токены (запятая/точка) рядом с цифрами
-                while first > 0 and re.fullmatch(r'[,\.\-]', toks[first - 1]):
-                    first -= 1
-                while last < len(toks) - 1 and re.fullmatch(r'[,\.\-]', toks[last + 1]):
-                    last += 1
-
-                num_start = block[first][0]
-                num_end = block[last][1]
-                normalized.append((num_start, num_end, "B-PERCENT"))
-
-                # если есть юнит(ы) процента после числовой части — объединяем их в один I-PERCENT
-                perc_after = [k for k in unit_idxs if k > last]
-                if not perc_after:
-                    # если нет после, попробуем взять любые unit вне числовой части
-                    perc_after = [k for k in unit_idxs if k < first] or []
-                if perc_after:
-                    p_start = block[perc_after[0]][0]
-                    p_end = block[perc_after[-1]][1]
-                    normalized.append((p_start, p_end, "I-PERCENT"))
-            else:
-                # нет цифр — оставляем весь блок как один B-PERCENT
-                normalized.append((block[0][0], block[-1][1], "B-PERCENT"))
-
-            i = j
-        else:
+        if typ != "PERCENT":
             normalized.append((s, e, lbl))
             i += 1
+            continue
+
+        # Собираем подряд идущие PERCENT
+        block = []
+        while i < n and raw_annotations[i][2].split("-", 1)[-1] == "PERCENT":
+            block.append(raw_annotations[i])
+            i += 1
+
+        toks = [text[ss:ee] for ss, ee, _ in block]
+
+        digit_idxs = [k for k, tok in enumerate(toks) if re.search(r'\d', tok)]
+        unit_idxs = [k for k, tok in enumerate(toks) if re.search(r'[%]|проц|процент', tok.lower())]
+
+        if digit_idxs:
+            first, last = digit_idxs[0], digit_idxs[-1]
+
+            while first > 0 and re.fullmatch(r'[,\.\-]', toks[first - 1]):
+                first -= 1
+            while last < len(toks) - 1 and re.fullmatch(r'[,\.\-]', toks[last + 1]):
+                last += 1
+
+            normalized.append((block[first][0], block[last][1], "B-PERCENT"))
+
+            perc_after = [k for k in unit_idxs if k > last] or [k for k in unit_idxs if k < first]
+            if perc_after:
+                normalized.append((block[perc_after[0]][0], block[perc_after[-1]][1], "I-PERCENT"))
+        else:
+            normalized.append((block[0][0], block[-1][1], "B-PERCENT"))
 
     return normalized
+
 
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
     """

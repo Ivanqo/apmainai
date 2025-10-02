@@ -1,5 +1,5 @@
 # Базовый образ Python
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 # Рабочая директория в контейнере
 WORKDIR /app

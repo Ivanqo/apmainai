@@ -344,14 +344,90 @@ def validate_entity(entity_type: str, text: str) -> bool:
     return False
 
 
+def normalize_percent_blocks(raw_annotations, text):
+    """
+    Схлопывает подряд идущие PERCENT-спаны в 1-2 правильных спана:
+      - B-PERCENT для числовой части (включая запятую/точку),
+      - I-PERCENT для символа % или слов "проц"/"процент" (если есть).
+    """
+    normalized = []
+    i = 0
+    n = len(raw_annotations)
+
+    while i < n:
+        s, e, lbl = raw_annotations[i]
+        typ = lbl.split("-", 1)[1] if "-" in lbl else lbl
+
+        if typ == "PERCENT":
+            # собираем блок подряд идущих PERCENT
+            j = i
+            block = []
+            while j < n:
+                lj = raw_annotations[j][2]
+                tj = lj.split("-", 1)[1] if "-" in lj else lj
+                if tj == "PERCENT":
+                    block.append(raw_annotations[j])
+                    j += 1
+                else:
+                    break
+
+            toks = [text[ss:ee] for ss, ee, _ in block]
+
+            # индексы токенов, содержащих цифру; и индексы токенов-юнитов процента
+            digit_idxs = [k for k, tok in enumerate(toks) if re.search(r'\d', tok)]
+            unit_idxs = [k for k, tok in enumerate(toks) if re.search(r'[%]|проц|процент', tok.lower())]
+
+            if digit_idxs:
+                # числовая часть — от первой до последней цифры
+                first = digit_idxs[0]
+                last = digit_idxs[-1]
+                # включаем соседние пунктуационные токены (запятая/точка) рядом с цифрами
+                while first > 0 and re.fullmatch(r'[,\.\-]', toks[first - 1]):
+                    first -= 1
+                while last < len(toks) - 1 and re.fullmatch(r'[,\.\-]', toks[last + 1]):
+                    last += 1
+
+                num_start = block[first][0]
+                num_end = block[last][1]
+                normalized.append((num_start, num_end, "B-PERCENT"))
+
+                # если есть юнит(ы) процента после числовой части — объединяем их в один I-PERCENT
+                perc_after = [k for k in unit_idxs if k > last]
+                if not perc_after:
+                    # если нет после, попробуем взять любые unit вне числовой части
+                    perc_after = [k for k in unit_idxs if k < first] or []
+                if perc_after:
+                    p_start = block[perc_after[0]][0]
+                    p_end = block[perc_after[-1]][1]
+                    normalized.append((p_start, p_end, "I-PERCENT"))
+            else:
+                # нет цифр — оставляем весь блок как один B-PERCENT
+                normalized.append((block[0][0], block[-1][1], "B-PERCENT"))
+
+            i = j
+        else:
+            normalized.append((s, e, lbl))
+            i += 1
+
+    return normalized
+
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
+    """
+    Постобработка: нормализация percent-блоков + оригинальная логика по дыркам/склейкам.
+    """
     if not raw_annotations:
-        return [(0, len(text), "O")]  # весь текст как O, если пусто
+        return [(0, len(text), "O")]
+
+    # Сортируем входные спаны на всякий случай
+    raw_annotations = sorted(raw_annotations, key=lambda x: x[0])
+
+    # Нормализуем подряд идущие PERCENT-спаны (основная правка)
+    raw_annotations = normalize_percent_blocks(raw_annotations, text)
 
     merged = []
     prev_label = None
     prev_type = None
-    prev_end = -1  # индекс конца предыдущего спана
+    prev_end = -1  # индекс конца предыдущего спана (в твоём коде используется +1 при срезах)
 
     for start_char, end_char, label in raw_annotations:
         # Проверяем на "дыру" между предыдущим и текущим спаном
@@ -363,7 +439,7 @@ def postprocess_annotations(text: str, raw_annotations: list) -> list:
             # 1. Если дыра очень маленькая (< 3 символов) → присоединяем к соседям
             if len(gap_text) <= 2:
                 if merged and prev_label and prev_label != "O":
-                    # расширяем предыдущую сущность
+                    # расширяем предыдущую сущность (оставляем её label)
                     last_start, last_end, last_label = merged[-1]
                     merged[-1] = (last_start, gap_end, last_label)
                 else:
@@ -389,14 +465,18 @@ def postprocess_annotations(text: str, raw_annotations: list) -> list:
 
         current_type = label.split("-", 1)[1]
 
-        # Склейка непрерывных сущностей
+        # Склейка непрерывных сущностей (оставляем поведение token-level BIO, т.е. добавляем I-)
         if prev_label and (prev_label.startswith("B-") or prev_label.startswith("I-")):
-            if current_type == prev_type and (start_char == prev_end + 1 or text[prev_end:start_char].strip(" -!/\\").isspace() or all(c in "-!/\\ " for c in text[prev_end:start_char])):
-                merged.append((start_char, end_char, f"I-{current_type}"))
-                prev_label = f"I-{current_type}"
-                prev_end = end_char
-                continue
+            if current_type == prev_type:
+                gap = text[prev_end+1:start_char]
+                if start_char <= prev_end + 2 and all(c in " ,.%()" for c in gap):
+                    # Продолжение той же сущности -> I-
+                    merged.append((start_char, end_char, f"I-{current_type}"))
+                    prev_label = f"I-{current_type}"
+                    prev_end = end_char
+                    continue
 
+        # По умолчанию — добавляем как есть (B- или I-)
         merged.append((start_char, end_char, label))
         prev_label = label
         prev_type = current_type
@@ -407,7 +487,6 @@ def postprocess_annotations(text: str, raw_annotations: list) -> list:
         gap_start = prev_end + 1
         gap_text = text[gap_start:].strip()
         if gap_text:
-            # если остаток — известная сущность
             added = False
             for etype in ["BRAND", "VOLUME", "PERCENT", "TYPE"]:
                 if validate_entity(etype, gap_text):

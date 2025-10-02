@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+torch
+transformers
+boto3
+pandas

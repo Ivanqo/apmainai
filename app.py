@@ -70,11 +70,12 @@ def download_from_bucket(best_checkpoint):
                             elapsed = time.time() - start_time
                             speed = downloaded / (elapsed + 1e-6) / 1024
                             remaining = (total_size - downloaded) / (speed * 1024 + 1e-6)
-                            logging.info(
-                                f"{file}: {percent:.2f}% скачано, "
-                                f"{downloaded}/{total_size} байт, скорость {speed:.2f} KB/s, "
-                                f"осталось ~{remaining:.1f} сек"
-                            )
+                            if downloaded // total_size * 100 % 10 == 0:
+                                logging.info(
+                                    f"{file}: {percent:.2f}% скачано, "
+                                    f"{downloaded}/{total_size} байт, скорость {speed:.2f} KB/s, "
+                                    f"осталось ~{remaining:.1f} сек"
+                                )
 
             if os.path.getsize(local_path) == 0:
                 logging.error(f"Файл {local_path} пуст после загрузки!")
@@ -240,9 +241,31 @@ def load_model_sync():
 # -------------------------
 # Вспомогательные функции — Блок 3
 # -------------------------
+def aggregate_labels(subtok_labels: list) -> str:
+    """
+    Гибридная агрегация:
+    1. Если все метки одинаковые → вернуть их.
+    2. Если метки только B-/I- одного типа → вернуть B- этого типа.
+    3. Если смесь с O → вернуть наиболее частую (majority).
+    """
+    if len(set(subtok_labels)) == 1:
+        return subtok_labels[0]
+
+    # Убираем O для проверки на один тип
+    non_o = [l for l in subtok_labels if l != "O"]
+    if non_o:
+        types = {l.split("-", 1)[-1] for l in non_o}
+        if len(types) == 1:
+            # один тип, но разный префикс → начинаем с B-
+            return "B-" + list(types)[0]
+
+    # fallback → majority
+    return Counter(subtok_labels).most_common(1)[0][0]
+
+
 with open("/app/brands_all.txt", "r", encoding="utf-8") as f:
     BRANDS = [line.strip().lower() for line in f if line.strip()]
-
+logger.info(f"{BRANDS}")
 BRANDS += ["coca-cola", "pepsi", "fanta", "sprite", "lipton", "lay's", "pringles", "kitkat", "oreo", "milka", "простоквашино", "домик в деревне", "valio", "danone", "добрый", "rich", "j7", "bonaqua", "святой источник"]
 
 VOLUME_UNITS = {"г", "кг", "л", "мл", "шт", "гр", "грамм", "килограмм"}
@@ -265,34 +288,88 @@ def validate_entity(entity_type: str, text: str) -> bool:
 
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
     if not raw_annotations:
-        return []
+        return [(0, len(text), "O")]  # весь текст как O, если пусто
+
     merged = []
     prev_label = None
     prev_type = None
-    prev_end = None
+    prev_end = -1  # индекс конца предыдущего спана
+
     for start_char, end_char, label in raw_annotations:
+        # Проверяем на "дыру" между предыдущим и текущим спаном
+        if start_char > prev_end + 1:
+            gap_start = prev_end + 1
+            gap_end = start_char - 1
+            gap_text = text[gap_start:gap_end + 1].strip()
+
+            # 1. Если дыра очень маленькая (< 3 символов) → присоединяем к соседям
+            if len(gap_text) <= 2:
+                if merged and prev_label and prev_label != "O":
+                    # расширяем предыдущую сущность
+                    last_start, last_end, last_label = merged[-1]
+                    merged[-1] = (last_start, gap_end, last_label)
+                else:
+                    # если после будет сущность → расширим её
+                    start_char = gap_start
+            # 2. Если текст в дырке сам является валидной сущностью
+            elif gap_text:
+                for etype in ["BRAND", "VOLUME", "PERCENT", "TYPE"]:
+                    if validate_entity(etype, gap_text):
+                        merged.append((gap_start, gap_end, f"B-{etype}"))
+                        break
+                else:
+                    # 3. Иначе дыра → "O"
+                    merged.append((gap_start, gap_end, "O"))
+
+        # Обрабатываем текущий токен
         if label == "O":
             merged.append((start_char, end_char, "O"))
             prev_label = None
             prev_type = None
-            prev_end = None
+            prev_end = end_char
             continue
+
         current_type = label.split("-", 1)[1]
+
+        # Склейка непрерывных сущностей
         if prev_label and (prev_label.startswith("B-") or prev_label.startswith("I-")):
             if current_type == prev_type and start_char == prev_end + 1:
                 merged.append((start_char, end_char, f"I-{current_type}"))
                 prev_label = f"I-{current_type}"
                 prev_end = end_char
                 continue
+
         merged.append((start_char, end_char, label))
         prev_label = label
         prev_type = current_type
         prev_end = end_char
+
+    # Проверяем хвост после последней сущности
+    if prev_end < len(text) - 1:
+        gap_start = prev_end + 1
+        gap_text = text[gap_start:].strip()
+        if gap_text:
+            # если остаток — известная сущность
+            added = False
+            for etype in ["BRAND", "VOLUME", "PERCENT", "TYPE"]:
+                if validate_entity(etype, gap_text):
+                    merged.append((gap_start, len(text) - 1, f"B-{etype}"))
+                    added = True
+                    break
+            if not added:
+                merged.append((gap_start, len(text) - 1, "O"))
+
     return merged
 
-def predict_annotations(text: str, keep_O: bool = True, fix_i_without_b: bool = True, agg_strategy: str = "first") -> list:
+def predict_annotations(
+    text: str,
+    keep_O: bool = True,
+    fix_i_without_b: bool = True,
+) -> list:
+
     if not text.strip():
         return []
+
     encoding = tokenizer(
         text,
         return_offsets_mapping=True,
@@ -301,6 +378,7 @@ def predict_annotations(text: str, keep_O: bool = True, fix_i_without_b: bool = 
         truncation=True,
         return_tensors="pt"
     )
+
     device = next(model.parameters()).device
     input_ids = encoding["input_ids"].to(device)
     attention_mask = encoding["attention_mask"].to(device)
@@ -320,21 +398,35 @@ def predict_annotations(text: str, keep_O: bool = True, fix_i_without_b: bool = 
 
     raw_annotations = []
     prev_word_label = None
-    for word_idx, token_idxs in word_to_token_idxs.items():
-        token_labels = [preds_seq[tok_idx] for tok_idx in token_idxs]
-        if agg_strategy == "first":
-            word_label_id = token_labels[0]
-        else:
-            word_label_id = Counter(token_labels).most_common(1)[0][0]
-        word_label = id2label[word_label_id]
-        if fix_i_without_b and word_label.startswith("I-") and (prev_word_label is None or prev_word_label[2:] != word_label[2:]):
-            word_label = "B-" + word_label[2:]
-        prev_word_label = word_label
-        if not keep_O and word_label == "O":
+    n_words = max(word_to_token_idxs.keys()) + 1 if word_to_token_idxs else 0
+
+    for word_id in range(n_words):
+        token_idxs = word_to_token_idxs.get(word_id, [])
+        if not token_idxs:
             continue
-        start_char = offsets[token_idxs[0]][0].item()
-        end_char = offsets[token_idxs[-1]][1].item()
-        raw_annotations.append((start_char, end_char, word_label))
+
+        start_char = int(offsets[token_idxs[0]][0].item())
+        end_char = int(offsets[token_idxs[-1]][1].item())
+
+        subtok_labels = [id2label[preds_seq[tok_idx]] for tok_idx in token_idxs]
+        label = aggregate_labels(subtok_labels)
+
+        # Фиксим "I-" без "B-"
+        if label.startswith("I-") and fix_i_without_b:
+            typ = label.split("-", 1)[1]
+            prev_typ = None
+            if prev_word_label and prev_word_label != "O":
+                prev_typ = prev_word_label.split("-", 1)[1]
+            if prev_word_label is None or prev_word_label == "O" or prev_typ != typ:
+                label = "B-" + typ
+
+        if label == "O" and not keep_O:
+            prev_word_label = "O"
+            continue
+
+        raw_annotations.append((start_char, end_char, label))
+        prev_word_label = label
+
     return postprocess_annotations(text, raw_annotations)
 
 # -------------------------

@@ -375,44 +375,38 @@ def merge_and_filter_entities(text: str, annotations: list) -> list:
 
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
     if not raw_annotations:
-        return [(0, len(text), "O")]
+        return [(0, len(text) - 1, "O")]
 
     merged = []
     prev_label = None
-    prev_type = None
     prev_end = -1
 
     for start_char, end_char, label in raw_annotations:
-        # Заполняем "O" перед первой сущностью
+        # Заполняем "O" перед сущностью, если есть пропуск
         if prev_end < start_char - 1:
-            gap_start = prev_end + 1
-            gap_end = start_char - 1
-            if gap_end >= gap_start:
-                merged.append((gap_start, gap_end, "O"))
+            merged.append((prev_end + 1, start_char - 1, "O"))
 
-        # Склейка непрерывных сущностей одного типа
-        current_type = label.split("-", 1)[-1] if label != "O" else None
-        if prev_label and prev_label != "O" and label != "O":
-            prev_type_check = prev_label.split("-", 1)[-1]
-            if current_type == prev_type_check and start_char <= prev_end + 1:
-                # Продлеваем предыдущую сущность
+        # Склейка только одинаковых сущностей без агрессивного расширения
+        if merged and prev_label and prev_label != "O" and label != "O":
+            prev_type = prev_label.split("-", 1)[-1]
+            cur_type = label.split("-", 1)[-1]
+            if prev_type == cur_type and start_char <= prev_end + 1:
                 merged[-1] = (merged[-1][0], end_char, prev_label)
                 prev_end = end_char
                 continue
 
         merged.append((start_char, end_char, label))
         prev_label = label
-        prev_type = current_type
         prev_end = end_char
 
-    # Заполняем "O" в конце текста
+    # Заполняем "O" в конце текста, если нужно
     if prev_end < len(text) - 1:
         merged.append((prev_end + 1, len(text) - 1, "O"))
 
-    # Дополнительная фильтрация и агрегация
+    # Минимальная фильтрация без агрессивной модификации
     merged = merge_and_filter_entities(text, merged)
-
     return merged
+
 
 def predict_annotations(
     text: str,

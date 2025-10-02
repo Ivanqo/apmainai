@@ -363,3 +363,9 @@ async def predict(req: PredictRequest, request: Request):
         for start, end, label in annotations
         if label != "O"
     ]
+
+
+@app.post("/health")
+async def predict(req: PredictRequest, request: Request):
+    return [
+        {"Я жив..."}]

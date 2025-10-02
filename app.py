@@ -225,14 +225,7 @@ DEVICE = None
 # -------------------------
 # Исправленная загрузка модели — Блок 2
 # -------------------------
-label_list = ["O", "B-TYPE", "I-TYPE", "B-BRAND", "I-BRAND", 
-              "B-VOLUME", "I-VOLUME", "B-PERCENT", "I-PERCENT"]
-label2id = {label: idx for idx, label in enumerate(label_list)}
-id2label = {idx: label for label, idx in label2id.items()}
 
-model = None
-tokenizer = None
-DEVICE = None
 
 def load_model_sync():
     global model, tokenizer, DEVICE
@@ -336,12 +329,16 @@ def validate_entity(entity_type: str, text: str) -> bool:
 
     if entity_type == "TYPE":
         return len(text) >= 3 and not text.isdigit()
+
     if entity_type == "BRAND":
         return text in BRANDS
+
     if entity_type == "VOLUME":
-        return any(unit in text for unit in VOLUME_UNITS) and any(char.isdigit() for char in text)
+        return any(unit in text for unit in VOLUME_UNITS) and bool(re.search(r'\d[.,]?\d*', text))
+
     if entity_type == "PERCENT":
-        return any(unit in text for unit in PERCENT_UNITS) and any(char.isdigit() for char in text)
+        return any(unit in text for unit in PERCENT_UNITS) and bool(re.search(r'\d[.,]?\d*', text))
+
     return False
 
 
@@ -392,6 +389,33 @@ def normalize_percent_blocks(raw_annotations, text):
             normalized.append((block[0][0], block[-1][1], "B-PERCENT"))
 
     return normalized
+
+
+def merge_small_gaps(annotations, text):
+    """
+    Объединяет соседние сущности одного типа, если они разделены короткими промежутками
+    или пунктуацией.
+    """
+    if not annotations:
+        return []
+
+    merged = [annotations[0]]
+    for start, end, label in annotations[1:]:
+        last_start, last_end, last_label = merged[-1]
+        last_type = last_label.split("-", 1)[-1]
+        current_type = label.split("-", 1)[-1]
+
+        gap_text = text[last_end:start].strip()
+
+        # Если пробел или пунктуация и gap короткий → объединяем
+        if (start - last_end <= 3 or gap_text in {",", ".", "-", ":", ";", "%"}) \
+                and last_type == current_type \
+                and last_label != "O" and label != "O":
+            merged[-1] = (last_start, end, last_label)  # расширяем предыдущий спан
+        else:
+            merged.append((start, end, label))
+    return merged
+
 
 
 def postprocess_annotations(text: str, raw_annotations: list) -> list:
@@ -478,7 +502,7 @@ def postprocess_annotations(text: str, raw_annotations: list) -> list:
                     break
             if not added:
                 merged.append((gap_start, len(text) - 1, "O"))
-
+    merged = merge_small_gaps(merged, text)
     return merged
 
 def predict_annotations(

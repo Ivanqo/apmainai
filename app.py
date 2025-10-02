@@ -159,20 +159,40 @@ DEVICE = None
 
 def load_model_sync():
     global model, tokenizer, DEVICE
-    tokenizer = AutoTokenizer.from_pretrained(best_checkpoint)
-    model = NERWithCRF(
-        model_name="DeepPavlov/rubert-base-cased-conversational",
-        num_labels=len(label_list)
-    )
-    state_dict = torch.load(os.path.join(best_checkpoint, "pytorch_model.bin"), map_location="cpu")
-    model.load_state_dict(state_dict)
+    try:
+        logger.info(f"Проверяю содержимое директории: {best_checkpoint}")
+        if os.path.exists(best_checkpoint):
+            files = os.listdir(best_checkpoint)
+            logger.info(f"Файлы в {best_checkpoint}: {files}")
+        else:
+            logger.error(f"Директория {best_checkpoint} не существует!")
 
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(DEVICE)
-    model.eval()
+        logger.info("Начинаю загрузку токенизатора...")
+        tokenizer = AutoTokenizer.from_pretrained(best_checkpoint)
+        logger.info("Токенизатор загружен ✅")
 
-    logger.info("Модель с CRF успешно загружена 🚀")
+        logger.info("Создаю модель...")
+        model = NERWithCRF(
+            model_name="DeepPavlov/rubert-base-cased-conversational",
+            num_labels=len(label_list)
+        )
 
+        model_path = os.path.join(best_checkpoint, "pytorch_model.bin")
+        if not os.path.exists(model_path):
+            logger.error(f"Файл весов модели не найден: {model_path}")
+        else:
+            logger.info(f"Загружаю веса модели из {model_path}")
+            state_dict = torch.load(model_path, map_location="cpu")
+            model.load_state_dict(state_dict)
+            logger.info("Веса модели загружены ✅")
+
+        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(DEVICE)
+        model.eval()
+        logger.info("Модель с CRF успешно загружена 🚀")
+
+    except Exception as e:
+        logger.exception(f"Ошибка при загрузке модели: {e}")
 # -------------------------
 # Вспомогательные функции — Блок 3
 # -------------------------

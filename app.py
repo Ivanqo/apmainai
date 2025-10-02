@@ -31,16 +31,56 @@ MODEL_FILES = [
     "special_tokens_map.json"
 ]
 
-def download_from_bucket():
+def download_from_bucket(best_checkpoint):
+    logging.info(f"Проверяю и создаю директорию: {best_checkpoint}")
+    os.makedirs(best_checkpoint, exist_ok=True)
+
     for file in MODEL_FILES:
         local_path = os.path.join(best_checkpoint, file)
-        if not os.path.exists(local_path):
-            url = f"{BASE_URL}/{file}"
-            logging.info(f"Скачиваю {file} из {url}")
-            r = requests.get(url)
+
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+            logging.info(f"Файл уже существует: {local_path}")
+            continue
+
+        url = f"{BASE_URL}/{file}"
+        logging.info(f"Начинаю скачивание {file} из {url}")
+
+        try:
+            r = requests.get(url, stream=True, timeout=60)
             r.raise_for_status()
+
+            total_size = int(r.headers.get('content-length', 0))
+            if total_size == 0:
+                logging.warning(f"Не удалось получить размер файла {file}.")
+            logging.info(f"Размер файла {file}: {total_size} байт")
+
             with open(local_path, "wb") as f:
-                f.write(r.content)
+                downloaded = 0
+                start_time = time.time()
+
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            elapsed = time.time() - start_time
+                            speed = downloaded / (elapsed + 1e-6) / 1024  # KB/s
+                            remaining = (total_size - downloaded) / (speed * 1024 + 1e-6)
+                            logging.info(
+                                f"Скачано {downloaded}/{total_size} байт "
+                                f"({percent:.2f}%), скорость {speed:.2f} KB/s, "
+                                f"осталось ~{remaining:.1f} сек."
+                            )
+
+                logging.info(f"Файл {file} успешно загружен: {local_path}")
+
+            if os.path.getsize(local_path) == 0:
+                logging.error(f"Файл {local_path} пуст после загрузки!")
+
+        except Exception as e:
+            logging.exception(f"Ошибка при скачивании {file}: {e}")
 
 # -------------------------
 # Логирование
